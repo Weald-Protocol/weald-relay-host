@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="185" ry="185"/>
+    </clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#070707"/>
+  <g clip-path="url(#squircle)">
+    <g transform="translate(512 476) scale(0.86) translate(-512 -512)">
+      <path d="M512 383.25 L512 769.5" stroke="#FFFFFF" stroke-width="59.225" stroke-linecap="butt"/>
+      <path d="M267.375 280.25 L396.125 615 L512 383.25 L627.875 615 L756.625 280.25"
+            fill="none" stroke="#FFFFFF" stroke-width="59.225" stroke-linejoin="miter" stroke-linecap="butt"/>
+    </g>
+    <g transform="translate(742 742)">
+      <circle cx="0" cy="0" r="186" fill="#070707"/>
+      <circle cx="0" cy="0" r="148" fill="#FFFFFF"/>
+      <g fill="none" stroke="#070707" stroke-width="19" stroke-linecap="round">
+        <circle cx="0" cy="0" r="106"/>
+        <path d="M-106 0 L106 0"/>
+        <path d="M-88 -56 L88 -56"/>
+        <path d="M-88 56 L88 56"/>
+        <ellipse cx="0" cy="0" rx="49" ry="106"/>
+      </g>
+    </g>
+  </g>
+</svg>
