@@ -205,8 +205,23 @@ docker compose -f compose.yml logs -f tunnel
 ```bash
 swift build                    # iterate
 ./scripts/build-app.sh         # universal, ad-hoc signed .app in build/
+./scripts/build-dmg.sh         # Developer ID signed, notarized WealdRelayHost.dmg
+./scripts/release.sh           # version, build, notarize, tag, publish, verify
 node scripts/render-icon.mjs   # regenerate Resources/AppIcon.icns from icon.svg
 ```
+
+`build-app.sh` signs ad hoc, which runs on the machine that built it and is
+blocked by Gatekeeper everywhere else. `build-dmg.sh` is the one a download
+needs: Developer ID signing, a hardened runtime, and a notarization ticket
+stapled to both the app and the image. `release.sh` wraps it with the version
+bump, the tag and the GitHub release, and it always names the asset
+`WealdRelayHost.dmg`, because getweald.com/self-host links
+`releases/latest/download/WealdRelayHost.dmg` and never a tagged asset. Both
+signing steps want the maintainer's Developer ID identity and a notarytool
+keychain profile named `weald-notary`, so they run on a Mac and not in CI.
+[The build workflow](.github/workflows/build.yml) proves the part that does not
+need a keychain: that this compiles for both architectures and assembles into a
+bundle.
 
 No dependencies beyond the Swift toolchain. The bundle is assembled by the
 script rather than Xcode because a status bar app needs `LSUIElement`, and
