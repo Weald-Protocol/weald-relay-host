@@ -14,6 +14,16 @@ final class RelayHost {
         case failed(String)
     }
 
+    /// What the front door is doing, as distinct from what the relay is doing.
+    /// A tunnel can be down while the relay is perfectly healthy, and saying so
+    /// is more useful than folding both into one dot.
+    enum Door: Equatable {
+        case closed
+        case opening
+        case open(String)          // the hostname the outside world uses
+        case failed(String)
+    }
+
     // MARK: settings, persisted so a restart comes back the same
 
     var port: Int {
@@ -32,23 +42,65 @@ final class RelayHost {
         }
     }
 
+    /// The front door, off by default: a relay that nobody asked to publish is
+    /// not published.
+    var tunnelMode: Tunnel.Mode {
+        didSet { UserDefaults.standard.set(tunnelMode.rawValue, forKey: "tunnelMode") }
+    }
+    /// The hostname a named tunnel answers on. Cloudflare owns it, this app is
+    /// only told about it, which is why it is typed rather than discovered.
+    var tunnelHostname: String {
+        didSet {
+            UserDefaults.standard.set(
+                tunnelHostname.trimmingCharacters(in: .whitespaces), forKey: "tunnelHostname"
+            )
+        }
+    }
+    /// Keychain-backed. The setter writes through so a token pasted into the
+    /// panel survives a quit without ever landing in a plist.
+    var tunnelToken: String {
+        didSet { Tunnel.Token.save(tunnelToken.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
     let retentionDays = 30
     let maxStorageGB = 50
 
     // MARK: observed state
 
     private(set) var phase: Phase = .stopped
+    private(set) var door: Door = .closed
     private(set) var publicIP: String?
     private(set) var lastLog: String = ""
 
     /// The bootstrap invite the relay prints while its workspace has no members.
     /// The first device to open the link becomes the trust root, so this is the
-    /// one thing a self-hoster needs beyond the socket URL.
-    private(set) var inviteLink: String?
+    /// one thing a self-hoster needs beyond the socket URL. Only the token is
+    /// kept: the link is rebuilt from wherever the relay is currently reachable,
+    /// so opening a tunnel fixes an already-minted link instead of stranding it.
+    private(set) var inviteToken: String?
     private(set) var inviteCode: String?
 
     var localURL: String { "ws://127.0.0.1:\(port)/relay" }
-    var publicURL: String? { publicIP.map { "ws://\($0):\(port)/relay" } }
+
+    /// The address to hand somebody else. A tunnel makes this a real `wss://`
+    /// URL that works; without one it is the raw IP, which is shown because it
+    /// is the truth about where this Mac lives and not because it will connect.
+    var publicURL: String? {
+        if case .open(let host) = door { return "wss://\(host)/relay" }
+        return publicIP.map { "ws://\($0):\(port)/relay" }
+    }
+
+    /// Whether `publicURL` is something a Weald client will actually accept.
+    var publicURLUsable: Bool {
+        if case .open = door { return true }
+        return false
+    }
+
+    var inviteLink: String? {
+        guard let inviteToken else { return nil }
+        if case .open(let host) = door { return "https://\(host)/join/\(inviteToken)" }
+        return "http://127.0.0.1:\(port)/join/\(inviteToken)"
+    }
 
     private var docker: String?
     private var poll: Task<Void, Never>?
@@ -58,6 +110,9 @@ final class RelayHost {
         port = d.object(forKey: "port") as? Int ?? 54040
         tag = d.string(forKey: "tag") ?? "auto"
         launchAtLogin = d.bool(forKey: "launchAtLogin")
+        tunnelMode = Tunnel.Mode(rawValue: d.string(forKey: "tunnelMode") ?? "") ?? .off
+        tunnelHostname = d.string(forKey: "tunnelHostname") ?? ""
+        tunnelToken = Tunnel.Token.load()
     }
 
     // MARK: lifecycle
@@ -91,28 +146,33 @@ final class RelayHost {
         }
         if await healthy() {
             phase = .running
-            if inviteLink == nil { await loadInvite() }
+            if inviteToken == nil { await loadInvite() }
+            if tunnelMode != .off, !doorSettled { await loadDoor() }
             return
         }
         let up = await Task.detached { Docker.daemonUp(bin) }.value
         phase = up ? .stopped : .needsRuntime
     }
 
+    private var doorSettled: Bool {
+        switch door {
+        case .open, .failed: return true
+        case .closed, .opening: return false
+        }
+    }
+
     func start() {
         guard let bin = docker ?? Docker.locate() else { phase = .needsRuntime; return }
         docker = bin
         phase = .starting
+        door = tunnelMode == .off ? .closed : .opening
         Task {
             if tag == "auto", let newest = await Registry.newestTag() {
                 resolvedTag = newest
             }
-            let port = port, tag = tag == "auto" ? resolvedTag : tag
-            let retention = retentionDays, storage = maxStorageGB
+            let plan = currentPlan()
             do {
-                try Compose.write(
-                    port: port, tag: tag,
-                    retentionDays: retention, maxStorageGB: storage
-                )
+                try Compose.write(plan)
             } catch {
                 phase = .failed(error.localizedDescription)
                 return
@@ -124,6 +184,7 @@ final class RelayHost {
             lastLog = result.message
             guard result.ok else {
                 phase = .failed(Self.explain(result.message))
+                door = tunnelMode == .off ? .closed : .failed("The tunnel did not start.")
                 return
             }
             // Migrations from zero run inside the binary, so first boot is slower
@@ -132,12 +193,28 @@ final class RelayHost {
                 if await healthy() {
                     phase = .running
                     await loadInvite()
+                    await openDoor()
                     return
                 }
                 try? await Task.sleep(for: .seconds(1))
             }
             phase = .failed("The relay did not answer on port \(port).")
         }
+    }
+
+    private func currentPlan() -> Compose.Plan {
+        let named = tunnelHostname.trimmingCharacters(in: .whitespaces)
+        return Compose.Plan(
+            port: port,
+            tag: tag == "auto" ? resolvedTag : tag,
+            retentionDays: retentionDays,
+            maxStorageGB: maxStorageGB,
+            tunnel: tunnelMode,
+            // A quick tunnel is not told its hostname until after it connects, so
+            // the relay keeps its loopback identity and the panel rewrites links.
+            hostname: tunnelMode == .named && !named.isEmpty ? named : "localhost",
+            tunnelToken: tunnelToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     func stop() {
@@ -147,6 +224,7 @@ final class RelayHost {
         Task {
             let result = await Task.detached { Docker.run(bin, ["compose", "-f", file, "down"]) }.value
             lastLog = result.message
+            door = .closed
             phase = result.ok ? .stopped : .failed(Self.explain(result.message))
             await refresh()
         }
@@ -157,9 +235,24 @@ final class RelayHost {
         let file = Compose.file.path
         Task {
             phase = .stopping
+            door = .closed
             _ = await Task.detached { Docker.run(bin, ["compose", "-f", file, "down"]) }.value
             start()
         }
+    }
+
+    /// Turn a public front door on or off in one gesture. The stack has to come
+    /// down and back up because the tunnel is a container in it, so this is the
+    /// button and the restart in one, rather than a setting the operator then
+    /// has to remember to apply.
+    func setTunnel(_ mode: Tunnel.Mode) {
+        guard mode != tunnelMode else { return }
+        tunnelMode = mode
+        guard phase == .running || phase == .starting else {
+            door = .closed
+            return
+        }
+        restart()
     }
 
     /// Stop and delete both volumes. Everything the relay holds is ciphertext it
@@ -173,8 +266,9 @@ final class RelayHost {
                 Docker.run(bin, ["compose", "-f", file, "down", "--volumes"])
             }.value
             lastLog = result.message
-            inviteLink = nil
+            inviteToken = nil
             inviteCode = nil
+            door = .closed
             phase = .stopped
             await refresh()
         }
@@ -194,6 +288,48 @@ final class RelayHost {
         }
     }
 
+    /// Wait for the edge to accept the tunnel, then take the hostname from the
+    /// daemon's own banner. Thirty seconds is generous: a quick tunnel is up in
+    /// two or three, and the slow case is the first pull of the image.
+    private func openDoor() async {
+        guard tunnelMode != .off else { door = .closed; return }
+        door = .opening
+        for _ in 0..<30 {
+            await loadDoor()
+            if doorSettled { return }
+            try? await Task.sleep(for: .seconds(1))
+        }
+        door = .failed("The tunnel did not come up. Check the log.")
+    }
+
+    /// Read the front door's state out of cloudflared's own output. It writes to
+    /// stderr, so both streams are considered.
+    func loadDoor() async {
+        guard let bin = docker, tunnelMode != .off else { door = .closed; return }
+        let file = Compose.file.path
+        let text = await Task.detached {
+            Docker.run(bin, ["compose", "-f", file, "logs", "--tail", "300", Tunnel.service])
+                .combined
+        }.value
+        if let why = Tunnel.problem(in: text) {
+            door = .failed(why)
+            return
+        }
+        switch tunnelMode {
+        case .off:
+            door = .closed
+        case .quick:
+            if let host = Tunnel.quickHostname(in: text) { door = .open(host) }
+        case .named:
+            let named = tunnelHostname.trimmingCharacters(in: .whitespaces)
+            if named.isEmpty {
+                door = .failed("Add the hostname your Cloudflare tunnel answers on.")
+            } else if Tunnel.registered(text) {
+                door = .open(named)
+            }
+        }
+    }
+
     /// Read the bootstrap invite back out of the relay's own stdout.
     ///
     /// The relay reprints the link on every start while the workspace is still
@@ -208,11 +344,10 @@ final class RelayHost {
             Docker.run(bin, ["compose", "-f", file, "logs", "--tail", "500", "relay"]).out
         }.value
         guard text.contains("this workspace") else { return }
-        // The link is host-relative to the relay's own hostname, which is
-        // `localhost` in this stack, so it is rewritten to the port in use.
-        if let token = Self.match(text, after: "invite link") {
-            let last = token.split(separator: "/").last.map(String.init) ?? token
-            inviteLink = "http://127.0.0.1:\(port)/join/\(last)"
+        // The link the relay prints is host-relative to its own hostname, so only
+        // the token is kept and the address is supplied by whichever door is open.
+        if let printed = Self.match(text, after: "invite link") {
+            inviteToken = printed.split(separator: "/").last.map(String.init) ?? printed
         }
         if let code = Self.match(text, after: "invite code") {
             inviteCode = code

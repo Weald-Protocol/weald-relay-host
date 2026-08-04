@@ -31,6 +31,10 @@ enum Docker {
             let e = err.trimmingCharacters(in: .whitespacesAndNewlines)
             return e.isEmpty ? out.trimmingCharacters(in: .whitespacesAndNewlines) : e
         }
+        /// Both streams, for reading a container log back. Which stream a
+        /// container's output lands on is the container's choice, and cloudflared
+        /// picks stderr, so a reader that watches only stdout sees nothing.
+        var combined: String { out + "\n" + err }
     }
 
     /// Run the runtime and wait. Called off the main actor.

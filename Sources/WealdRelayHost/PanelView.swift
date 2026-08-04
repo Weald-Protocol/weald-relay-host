@@ -108,7 +108,10 @@ struct PanelView: View {
         case .stopped: return "Not running"
         case .starting: return "Starting the relay"
         case .stopping: return "Stopping"
-        case .running: return "Serving on this Mac"
+        case .running:
+            if case .open = host.door { return "Serving over the tunnel" }
+            if case .opening = host.door { return "Serving, opening the door" }
+            return "Serving on this Mac"
         case .failed: return "Could not start"
         }
     }
@@ -132,12 +135,7 @@ struct PanelView: View {
                 caption: "Paste into a Weald project's relay field.",
                 placeholder: "start the relay to get a URL"
             )
-            CopyRow(
-                title: "Public address",
-                value: host.publicURL,
-                caption: "Your IP, for people off this Mac. Needs a TLS front door.",
-                placeholder: "looking up your IP"
-            )
+            PublicAddress(host: host)
         }
     }
 
@@ -175,22 +173,15 @@ struct PanelView: View {
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Theme.field))
             }
-            HStack(spacing: 10) {
-                SectionLabel(text: "Image tag")
-                Spacer()
-                TextField("auto", text: $host.tag)
-                    .textFieldStyle(.plain)
-                    .font(Theme.mono)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 130)
-                    .padding(.horizontal, 8).padding(.vertical, 5)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.field))
-            }
+            Field(label: "Image tag", placeholder: "auto", text: $host.tag)
             if host.tag == "auto" {
                 Text("auto runs the newest release: \(host.resolvedTag)")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.dim)
             }
+            Hairline()
+            PublicAccessSettings(host: host)
+            Hairline()
             Toggle(isOn: $host.launchAtLogin) {
                 Text("Start at login")
                     .font(Theme.body)
