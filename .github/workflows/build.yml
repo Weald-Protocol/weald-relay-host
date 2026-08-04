@@ -24,7 +24,14 @@ permissions:
 
 jobs:
   app:
-    runs-on: macos-14
+    # macos-26, not macos-14. The deployment target is macOS 14, which is a
+    # property of the bundle and not of the machine that builds it, and this
+    # source is written for the Swift 6 language mode: on the macos-14 image's
+    # Swift 5.10 the SwiftUI views fail to compile with a dozen actor-isolation
+    # errors that say nothing about the code and everything about the toolchain.
+    # The release is cut on a current Xcode, so CI runs one too, otherwise it is
+    # testing a compiler nothing ships from.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
