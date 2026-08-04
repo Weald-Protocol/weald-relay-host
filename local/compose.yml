@@ -1,0 +1,62 @@
+# A Weald relay on this machine, without the menu bar app.
+#
+# Same stack the app generates: one relay, one Postgres, one short lived
+# container that takes ownership of the blob volume. Plaintext on loopback,
+# which is the only place a Weald client accepts plaintext.
+name: weald-relay-local
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: weald
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weald}
+      POSTGRES_DB: weald_relay
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weald -d weald_relay"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The relay image is distroless and runs as uid 65532 with no shell, so it
+  # cannot take ownership of a fresh named volume itself. This does it and exits.
+  blobs-init:
+    image: alpine:3.20
+    command: ["sh", "-c", "mkdir -p /var/lib/weald/blobs && chown -R 65532:65532 /var/lib/weald"]
+    restart: "no"
+    volumes:
+      - blobs:/var/lib/weald
+
+  relay:
+    # The published image carries release tags and no moving `latest`, on
+    # purpose: a relay's digest is what verification compares against release
+    # provenance. `./weald-relay up` resolves the newest release tag for you
+    # when WEALD_RELAY_TAG is `auto`.
+    image: ghcr.io/weald-protocol/wealdrelay:${WEALD_RELAY_TAG:-wealdrelay-v0.1.5}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      blobs-init:
+        condition: service_completed_successfully
+    # Loopback only. Nothing on your network can reach this, by design.
+    ports:
+      - "127.0.0.1:${WEALD_RELAY_PORT:-54040}:${WEALD_RELAY_PORT:-54040}"
+    environment:
+      WEALD_RELAY_DATABASE_URL: postgres://weald:${POSTGRES_PASSWORD:-weald}@db:5432/weald_relay
+      WEALD_RELAY_STORAGE_URL: file:///var/lib/weald/blobs
+      WEALD_RELAY_LISTEN: 0.0.0.0:${WEALD_RELAY_PORT:-54040}
+      WEALD_RELAY_HOSTNAME: ${WEALD_RELAY_HOSTNAME:-localhost}
+      # Nothing terminates TLS in front of a loopback relay and nothing needs to.
+      WEALD_RELAY_TLS: "off"
+      WEALD_RELAY_RETENTION_DAYS: ${WEALD_RELAY_RETENTION_DAYS:-unlimited}
+      WEALD_RELAY_MAX_STORAGE_GB: ${WEALD_RELAY_MAX_STORAGE_GB:-unlimited}
+    volumes:
+      - blobs:/var/lib/weald
+
+volumes:
+  db:
+  blobs:

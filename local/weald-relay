@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Weald relay, local, from a terminal.
+#
+#   ./weald-relay up        start it and print the URL and the first device link
+#   ./weald-relay status    is the socket answering
+#   ./weald-relay url       the URL to paste into Weald
+#   ./weald-relay invite    the first device link and one-time code, if unclaimed
+#   ./weald-relay logs      follow the relay log
+#   ./weald-relay upgrade   pull the newest image and restart
+#   ./weald-relay backup    a dated tarball of the database and the blobs
+#   ./weald-relay restore   put a tarball back
+#   ./weald-relay down      stop it, keep the data
+#   ./weald-relay erase     stop it, delete the data
+#   ./weald-relay doctor    check the prerequisites and say what is wrong
+set -euo pipefail
+
+cd "$(dirname "$0")"
+[ -f .env ] || cp .env.example .env
+# shellcheck disable=SC1091
+set -a; . ./.env; set +a
+PORT="${WEALD_RELAY_PORT:-54040}"
+FALLBACK_TAG=wealdrelay-v0.1.5
+compose() { docker compose -f compose.yml "$@"; }
+
+# The published image carries release tags and no moving `latest`, so `auto`
+# means: ask the registry which release is newest, and pin to a known one when it
+# cannot be reached.
+resolve_tag() {
+  case "${WEALD_RELAY_TAG:-auto}" in
+    auto|"") ;;
+    *) printf '%s\n' "$WEALD_RELAY_TAG"; return 0 ;;
+  esac
+  local token tags newest
+  token="$(curl -fsS --max-time 8 \
+    'https://ghcr.io/token?scope=repository:weald-protocol/wealdrelay:pull&service=ghcr.io' \
+    2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')" || true
+  if [ -n "${token:-}" ]; then
+    tags="$(curl -fsS --max-time 8 -H "Authorization: Bearer $token" \
+      https://ghcr.io/v2/weald-protocol/wealdrelay/tags/list 2>/dev/null || true)"
+    newest="$(printf '%s' "$tags" | tr ',' '\n' | grep -o 'wealdrelay-v[0-9]\+\.[0-9]\+\.[0-9]\+' \
+      | sort -t. -k1,1V -u | sort -V | tail -1 || true)"
+  fi
+  printf '%s\n' "${newest:-$FALLBACK_TAG}"
+}
+
+die() { printf '%s\n' "$1" >&2; exit 1; }
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 \
+    || die "Docker is not installed. Install Docker Desktop or OrbStack, then open it once."
+  docker info >/dev/null 2>&1 \
+    || die "Docker is installed but not running. Open Docker Desktop or OrbStack and wait for it to start."
+  docker compose version >/dev/null 2>&1 \
+    || die "The docker compose plugin is missing. Update Docker."
+}
+
+healthy() { curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; }
+
+wait_healthy() {
+  printf 'Waiting for the relay to answer on port %s' "$PORT"
+  for _ in $(seq 1 120); do
+    if healthy; then printf ' ok\n'; return 0; fi
+    printf '.'; sleep 1
+  done
+  printf '\n'
+  die "The relay did not answer within two minutes. Run ./weald-relay logs to see why."
+}
+
+# The bootstrap invite is printed once, while the workspace has no members, and
+# the relay keeps only a hash of the code, so it can never be shown again.
+print_invite() {
+  local log token code
+  log="$(compose logs --no-color relay 2>/dev/null || true)"
+  token="$(printf '%s\n' "$log" | grep 'invite link' | tail -1 | awk '{print $NF}' || true)"
+  code="$(printf '%s\n' "$log" | grep 'invite code' | tail -1 | awk '{print $NF}' || true)"
+  if [ -z "$token" ]; then
+    printf 'No unclaimed first device link. A device has already claimed this workspace.\n'
+    return 0
+  fi
+  printf 'First device link  http://127.0.0.1:%s/join/%s\n' "$PORT" "${token##*/}"
+  [ -n "$code" ] && printf 'One-time code      %s\n' "$code"
+  printf 'Copy the code now. It is minted once and cannot be shown again.\n'
+}
+
+# Resolved once per invocation, and only for the verbs that start containers.
+ensure_tag() {
+  WEALD_RELAY_TAG="$(resolve_tag)"; export WEALD_RELAY_TAG
+  printf 'Relay image  ghcr.io/weald-protocol/wealdrelay:%s\n' "$WEALD_RELAY_TAG"
+}
+
+case "${1:-up}" in
+  up|start)
+    require_docker
+    ensure_tag
+    compose up -d
+    wait_healthy
+    printf '\nThis Mac  ws://127.0.0.1:%s/relay\n\n' "$PORT"
+    print_invite
+    ;;
+  down|stop)   compose down ;;
+  restart)     ensure_tag; compose restart relay; wait_healthy ;;
+  status)
+    if healthy; then printf 'Answering on ws://127.0.0.1:%s/relay\n' "$PORT"
+    else printf 'Not answering on port %s\n' "$PORT"; fi
+    compose ps
+    ;;
+  url)         printf 'ws://127.0.0.1:%s/relay\n' "$PORT" ;;
+  invite)      print_invite ;;
+  logs)        compose logs -f "${2:-relay}" ;;
+  upgrade)
+    require_docker
+    ensure_tag
+    compose pull; compose up -d; wait_healthy
+    ;;
+  backup)
+    out="weald-relay-backup-$(date +%Y%m%d-%H%M%S).tar"
+    tmp="$(mktemp -d)"
+    compose exec -T db pg_dump -U weald -Fc weald_relay > "$tmp/db.dump"
+    docker run --rm -v weald-relay-local_blobs:/blobs:ro -v "$tmp:/out" alpine:3.20 \
+      tar -cf /out/blobs.tar -C /blobs .
+    tar -cf "$out" -C "$tmp" db.dump blobs.tar
+    rm -rf "$tmp"
+    printf '%s\n' "$out"
+    printf 'Ciphertext only. This can be stored anywhere.\n'
+    ;;
+  restore)
+    [ -n "${2:-}" ] || die "Usage: ./weald-relay restore <backup.tar>"
+    [ -f "$2" ] || die "No such file: $2"
+    ensure_tag
+    tmp="$(mktemp -d)"; tar -xf "$2" -C "$tmp"
+    # Nothing may hold the database open while it is replaced, so the relay stops
+    # first and comes back at the end.
+    compose up -d db
+    compose stop relay >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      compose exec -T db pg_isready -U weald -d weald_relay >/dev/null 2>&1 && break
+      sleep 1
+    done
+    compose exec -T db psql -U weald -d postgres \
+      -c 'DROP DATABASE IF EXISTS weald_relay WITH (FORCE)' \
+      -c 'CREATE DATABASE weald_relay' >/dev/null
+    compose exec -T db pg_restore -U weald -d weald_relay < "$tmp/db.dump"
+    docker run --rm -v weald-relay-local_blobs:/blobs -v "$tmp:/in:ro" alpine:3.20 \
+      sh -c 'tar -xf /in/blobs.tar -C /blobs && chown -R 65532:65532 /blobs'
+    rm -rf "$tmp"
+    compose up -d
+    wait_healthy
+    ;;
+  erase)
+    printf 'This deletes the relay database and every stored blob. Type erase to confirm: '
+    read -r answer
+    [ "$answer" = "erase" ] || die "Nothing was deleted."
+    compose down -v
+    ;;
+  doctor)
+    require_docker
+    printf 'Docker            ok\n'
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && ! healthy; then
+      printf 'Port %-13s taken by something that is not this relay\n' "$PORT"
+    else
+      printf 'Port %-13s free or ours\n' "$PORT"
+    fi
+    if healthy; then printf 'Relay             answering\n'; else printf 'Relay             not answering (run ./weald-relay up)\n'; fi
+    ;;
+  *) sed -n '2,20p' "$0" | sed 's|^# \{0,1\}||'; exit 1 ;;
+esac

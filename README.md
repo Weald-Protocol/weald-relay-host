@@ -9,7 +9,14 @@
 A status bar app. Start the relay, copy the URL, paste it into Weald.
 That is the whole product.
 
-<sub>macOS 14+ · Apple silicon and Intel · Apache 2.0 · v0.3.0</sub>
+<sub>macOS 14+ · Apple silicon and Intel · Apache 2.0 · v0.4.0</sub>
+
+[Quickstart](docs/quickstart.md) ·
+[Configuration](docs/configuration.md) ·
+[Remote access](docs/remote-access.md) ·
+[Backup](docs/backup-restore.md) ·
+[Troubleshooting](docs/troubleshooting.md) ·
+[Without the app](local/)
 
 </div>
 
@@ -40,7 +47,9 @@ open build
 ```
 
 Drag **Weald Relay Host.app** into `/Applications` and launch it. A white
-**W** appears in your menu bar.
+**W** appears in your menu bar. On Linux, on a headless Mac, or if you would
+rather read a compose file than trust a toggle, use [`local/`](local/) instead:
+the same stack, driven by `./weald-relay up`.
 
 **3. Click the W, then Start relay.**
 
@@ -158,6 +167,9 @@ An operator who is not a workspace member has exactly two powers: keep the
 service running, and stop keeping it running.
 
 ## Troubleshooting
+
+The common ones are here. The rest, with backups, upgrades and every environment
+variable in the stack, are in [docs/](docs/).
 
 **"Docker is not running."** Open Docker Desktop or OrbStack and wait for it
 to finish starting.
